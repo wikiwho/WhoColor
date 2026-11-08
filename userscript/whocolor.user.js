@@ -143,8 +143,8 @@ Wikiwho = {
         // The menu on the right (displaying authors)
         var elementTop = $('#content').offset().top + 1;
 
-        Wikiwho.rightbar = $('<div id="wikiwhorightbar" class="mw-body"></div>').hide().prependTo($("div#content.mw-body"));
-        $("div#content.mw-body").css("position", "relative");
+        Wikiwho.rightbar = $('<div id="wikiwhorightbar" class="mw-body"></div>').hide().prependTo($("#content.mw-body"));
+        $("#content.mw-body").css("position", "relative");
         Wikiwho.rightbar.css("top", "5em");
         Wikiwho.rightbar.css("right", "calc(-15.5em - 3px)");
 
@@ -222,7 +222,7 @@ Wikiwho = {
         });
 
         // The sequence history
-        Wikiwho.seqHistBox = $('<div id="wikiwhoseqhistbox"></div>').hide().appendTo($("div#content.mw-body"));
+        Wikiwho.seqHistBox = $('<div id="wikiwhoseqhistbox"></div>').hide().appendTo($("#content.mw-body"));
         Wikiwho.seqHistBox.append('<div id="wikiwhoseqhistboxopenindicator"><a>&#9650; Click here to open the WhoColor token history for the selected text &#9650;</a></div>');
         Wikiwho.seqHistBox.append('<div id="wikiwhoseqhistboxtoolongindicator">Selected text part is too long for the WhoColor token history</div>');
         Wikiwho.seqHistBox.append('<div id="wikiwhoseqhistboxonerevindicator">All the selected wiki markup was added in the currently viewed revision.</div>');
@@ -252,9 +252,9 @@ Wikiwho = {
         //Wikiwho.newcontent.attr("id", "mw-content-text");
 
         // Squeeze main content a bit and show the bar to the right
-        //$("div#content").css("margin-right", "251px");
+        //$("#content").css("margin-right", "251px");
         Wikiwho.rightbar.animate({"right": "0px"}, 500, function() {});
-        $("div#content").animate({"margin-right": "15.5em"}, 500, function() {});
+        $("#content").animate({"margin-right": "15.5em"}, 500, function() {});
         Wikiwho.rightbar.show();
 
         // Change flag
@@ -275,10 +275,10 @@ Wikiwho = {
         Wikiwho.newcontent.fadeOut(250, function() { Wikiwho.newcontent.hide(); Wikiwho.originalcontent.fadeIn(250, function() { Wikiwho.originalcontent.show(); }); });
 
         // Unsqueeze main content and hide the bar to the right
-        //$("div#content").css("margin-right", "");
-        //$("div#content").animate({"margin-right": ""}, 500, function() { Wikiwho.rightbar.hide(); });
+        //$("#content").css("margin-right", "");
+        //$("#content").animate({"margin-right": ""}, 500, function() { Wikiwho.rightbar.hide(); });
         Wikiwho.rightbar.animate({"right": "-15.6em"}, 500, function() { Wikiwho.rightbar.hide(); });
-        $("div#content").animate({"margin-right": ""}, 500, function() {});
+        $("#content").animate({"margin-right": ""}, 500, function() {});
         //Wikiwho.rightbar.hide();
 
         // Change flag
@@ -343,7 +343,13 @@ Wikiwho = {
         }
 
         // Add extended markup content
-        Wikiwho.newcontent.append(data.extended_html);
+        if(Wikiwho.isExtendedHtmlBroken(data.extended_html)) {
+            // Server-side rendering failed (article too large, see isExtendedHtmlBroken):
+            // annotate the already rendered page content in the browser instead
+            Wikiwho.newcontent.append(Wikiwho.buildClientSideHtml(data.tokens));
+        } else {
+            Wikiwho.newcontent.append(data.extended_html);
+        }
 
         // Remove loading indicator
         Wikiwho.newcontent.css('background', '').css('min-height', '');
@@ -374,6 +380,186 @@ Wikiwho = {
         // Debug output (color tokens in alternating colors)
         // $(".editor-token").filter(":odd").css("background-color", "green");
         // $(".editor-token").filter(":even").css("background-color", "yellow");
+    },
+
+    // The server wraps every token of the wikitext in a <span> and lets Wikipedia render it.
+    // For large articles this pushes the wikitext over MediaWiki's 2 MB limit ($wgMaxArticleSize);
+    // MediaWiki then expands no templates at all and the result shows raw wikitext.
+    // The NewPP limit report in the HTML tells us: "Revision size: 2751372/2097152 bytes".
+    isExtendedHtmlBroken: function(html) {
+        var m = /Revision size: (\d+)\/(\d+) bytes/.exec(html || "");
+        return m !== null && parseInt(m[1], 10) > parseInt(m[2], 10);
+    },
+
+    // Fallback: wrap the words of the normally rendered article in token spans ourselves,
+    // by matching them in order against the WikiWho token list.
+    buildClientSideHtml: function(tokens) {
+        var container = document.createElement("div");
+        container.innerHTML = Wikiwho.originalcontent.html();
+
+        // Index token positions by token string for fast forward lookups
+        var index = Object.create(null);
+        for(var t = 0; t < tokens.length; t++) {
+            var str = tokens[t][1];
+            (index[str] || (index[str] = [])).push(t);
+        }
+        var used = new Uint8Array(tokens.length);
+
+        // First unused position of word in [from, from + maxDist], or -1
+        function find(word, from, maxDist) {
+            var arr = index[word];
+            if(!arr) return -1;
+            var lo = 0, hi = arr.length;
+            while(lo < hi) {
+                var mid = (lo + hi) >> 1;
+                if(arr[mid] < from) lo = mid + 1; else hi = mid;
+            }
+            for(; lo < arr.length && arr[lo] - from <= maxDist; lo++) {
+                if(!used[arr[lo]]) return arr[lo];
+            }
+            return -1;
+        }
+
+        var wordRe = /[\p{L}\p{N}]/u;
+        var unitRe = /[\p{L}\p{N}]+|[^\s\p{L}\p{N}]/gu;
+
+        // Collect text units (words / single punctuation chars) of all text nodes below root
+        function collectUnits(root, skipSelector) {
+            var units = [];
+            var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null);
+            var node;
+            while((node = walker.nextNode())) {
+                if(node.parentElement && node.parentElement.closest(skipSelector)) continue;
+                var text = node.nodeValue, m;
+                unitRe.lastIndex = 0;
+                while((m = unitRe.exec(text)) !== null) {
+                    var w = m[0].toLowerCase();
+                    units.push({node: node, start: m.index, end: m.index + m[0].length,
+                                word: w, isWord: wordRe.test(w), token: -1});
+                }
+            }
+            return units;
+        }
+
+        // Assign tokens to units (like a diff):
+        // 1. anchors: words occurring equally often (1-3x) among the units and the unused tokens,
+        //    k-th occurrence paired with k-th occurrence
+        // 2. keep the longest chain of anchors that is in order on both sides (LIS)
+        // 3. fill the gaps between anchors with a greedy forward search bounded by the next anchor
+        // Words WikiWho never saw (generated by templates) stay unassigned.
+        function assign(units) {
+            var i, k;
+
+            var unitPos = Object.create(null);
+            for(i = 0; i < units.length; i++) {
+                if(!units[i].isWord) continue;
+                (unitPos[units[i].word] || (unitPos[units[i].word] = [])).push(i);
+            }
+            var anchors = [];  // [unitIdx, tokenIdx]
+            for(var w in unitPos) {
+                if(!index[w]) continue;
+                var free = index[w].filter(function(t) { return !used[t]; });
+                if(free.length !== unitPos[w].length || free.length > 3) continue;
+                for(k = 0; k < free.length; k++) anchors.push([unitPos[w][k], free[k]]);
+            }
+            anchors.sort(function(a, b) { return a[0] - b[0]; });
+
+            // Longest increasing subsequence by token index
+            var tails = [], prev = new Array(anchors.length);
+            for(i = 0; i < anchors.length; i++) {
+                var lo = 0, hi = tails.length;
+                while(lo < hi) {
+                    var mid = (lo + hi) >> 1;
+                    if(anchors[tails[mid]][1] < anchors[i][1]) lo = mid + 1; else hi = mid;
+                }
+                prev[i] = lo > 0 ? tails[lo - 1] : -1;
+                tails[lo] = i;
+            }
+            var chain = [];
+            for(i = tails.length ? tails[tails.length - 1] : -1; i >= 0; i = prev[i]) chain.push(anchors[i]);
+            chain.reverse();
+            chain.forEach(function(a) { units[a[0]].token = a[1]; used[a[1]] = 1; });
+
+            // A far jump inside a gap is only taken when the following words confirm it
+            function confirms(i, k) {
+                var q = k + 1, checked = 0, hits = 0;
+                for(var j = i + 1; j < units.length && checked < 6; j++) {
+                    if(!units[j].isWord) continue;
+                    checked++;
+                    var c = find(units[j].word, q, 60);
+                    if(c >= 0) { hits++; q = c + 1; }
+                }
+                return checked === 0 || hits >= Math.min(3, checked);
+            }
+
+            var c = 0, pos = 0;
+            for(i = 0; i < units.length; i++) {
+                if(c < chain.length && chain[c][0] === i) { pos = chain[c][1] + 1; c++; continue; }
+                var bound = c < chain.length ? chain[c][1] : tokens.length;  // exclusive
+                var u = units[i];
+                k = find(u.word, pos, u.isWord ? 60 : 15);
+                if(k < 0 && u.isWord) {
+                    k = find(u.word, pos, bound - pos);
+                    if(k >= 0 && !confirms(i, k)) k = -1;
+                }
+                if(k >= bound) k = -1;
+                if(k >= 0) {
+                    u.token = k;
+                    used[k] = 1;
+                    pos = k + 1;
+                }
+            }
+        }
+
+        // Replace text nodes by text + token spans (a span also takes the whitespace before its word)
+        function render(units) {
+            var i = 0;
+            while(i < units.length) {
+                var node = units[i].node, text = node.nodeValue;
+                var frag = document.createDocumentFragment();
+                var last = 0, changed = false;
+                for(; i < units.length && units[i].node === node; i++) {
+                    var u = units[i];
+                    if(u.token < 0) continue;
+                    var spanStart = last;
+                    // keep text before the preceding whitespace as plain text
+                    var lead = text.slice(last, u.start);
+                    var ws = /\s*$/.exec(lead)[0];
+                    if(lead.length > ws.length) {
+                        frag.appendChild(document.createTextNode(lead.slice(0, lead.length - ws.length)));
+                        spanStart = u.start - ws.length;
+                    }
+                    var span = document.createElement("span");
+                    span.className = "editor-token token-editor-" + tokens[u.token][5];
+                    span.id = "token-" + u.token;
+                    span.textContent = text.slice(spanStart, u.end);
+                    frag.appendChild(span);
+                    last = u.end;
+                    changed = true;
+                }
+                if(changed) {
+                    if(last < text.length) frag.appendChild(document.createTextNode(text.slice(last)));
+                    node.parentNode.replaceChild(frag, node);
+                }
+            }
+        }
+
+        var alwaysSkip = "script, style, .mw-editsection, sup.reference, .mw-cite-backlink";
+        var refLists = ".mw-references-wrap, ol.references";
+
+        // Article body first, then the reference lists (their wikitext sits inline in the
+        // article, so they are matched separately against the tokens left over)
+        var mainUnits = collectUnits(container, alwaysSkip + ", .toc, #toc, " + refLists);
+        var refUnits = [];
+        $(container).find(refLists).not($(container).find(refLists).find(refLists)).each(function() {
+            refUnits = refUnits.concat(collectUnits(this, alwaysSkip));
+        });
+        assign(mainUnits);
+        assign(refUnits);
+        render(mainUnits);
+        render(refUnits);
+
+        return $(container).contents();
     },
 
     addHistoryEvents: function() {
